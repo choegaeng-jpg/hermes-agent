@@ -3257,11 +3257,18 @@ class AIAgent:
         self._close_openai_client(client, reason=reason, shared=False)
 
     def _run_codex_stream(self, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
-        """Execute one streaming Responses API request and return the final response."""
+        """Execute one streaming Responses API request and return the final response.
+
+        Important invariant: once any delta was already emitted to callbacks,
+        we must not switch to the create(stream=True) fallback path. Emitting
+        a second-generation fallback response after partial delivery causes
+        duplicated/misaligned output for users.
+        """
         active_client = client or self._ensure_primary_openai_client(reason="codex_stream_direct")
         max_stream_retries = 1
         has_tool_calls = False
         first_delta_fired = False
+        deltas_were_sent = False
         for attempt in range(max_stream_retries + 1):
             try:
                 with active_client.responses.stream(**api_kwargs) as stream:
@@ -3281,6 +3288,7 @@ class AIAgent:
                                         except Exception:
                                             pass
                                 self._fire_stream_delta(delta_text)
+                                deltas_were_sent = True
                         # Track tool calls to suppress text streaming
                         elif "function_call" in event_type:
                             has_tool_calls = True
@@ -3293,6 +3301,12 @@ class AIAgent:
             except RuntimeError as exc:
                 err_text = str(exc)
                 missing_completed = "response.completed" in err_text
+                if missing_completed and deltas_were_sent:
+                    logger.warning(
+                        "Codex stream failed after partial delivery; skipping create(stream=True) fallback. %s",
+                        self._client_log_context(),
+                    )
+                    raise
                 if missing_completed and attempt < max_stream_retries:
                     logger.debug(
                         "Responses stream closed before completion (attempt %s/%s); retrying. %s",
@@ -3584,6 +3598,10 @@ class AIAgent:
 
         Falls back to _interruptible_api_call on provider errors indicating
         streaming is not supported.
+
+        Important invariant: if any text/reasoning delta was already delivered,
+        we must not fall back to non-streaming. Partial streamed output plus a
+        fallback full response creates duplicate/confusing UX.
         """
         if self.api_mode == "codex_responses":
             # Codex streams internally via _run_codex_stream. The main dispatch
@@ -3782,11 +3800,13 @@ class AIAgent:
                                 if text and not has_tool_use:
                                     _fire_first_delta()
                                     self._fire_stream_delta(text)
+                                    deltas_were_sent["yes"] = True
                             elif delta_type == "thinking_delta":
                                 thinking_text = getattr(delta, "thinking", "")
                                 if thinking_text:
                                     _fire_first_delta()
                                     self._fire_reasoning_delta(thinking_text)
+                                    deltas_were_sent["yes"] = True
 
                 # Return the native Anthropic Message for downstream processing
                 return stream.get_final_message()
@@ -3811,7 +3831,8 @@ class AIAgent:
                             # delivered.  Don't retry or fall back — partial
                             # content already reached the user.
                             logger.warning(
-                                "Streaming failed after partial delivery, not retrying: %s", e
+                                "Streaming failed after partial delivery; fallback is disabled to avoid duplicate output: %s",
+                                e,
                             )
                             result["error"] = e
                             return
