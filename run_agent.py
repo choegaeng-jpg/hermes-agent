@@ -3536,14 +3536,20 @@ class AIAgent:
                 except Exception:
                     pass
 
-    def _fire_reasoning_delta(self, text: str) -> None:
-        """Fire reasoning callback if registered."""
+    def _fire_reasoning_delta(self, text: str) -> bool:
+        """Fire reasoning callback if registered.
+
+        Returns:
+            bool: True if a reasoning callback was present and invoked.
+        """
         cb = self.reasoning_callback
         if cb is not None:
             try:
                 cb(text)
             except Exception:
                 pass
+            return True
+        return False
 
     def _fire_tool_gen_started(self, tool_name: str) -> None:
         """Notify display layer that the model is generating tool call arguments.
@@ -3660,8 +3666,8 @@ class AIAgent:
                 if reasoning_text:
                     reasoning_parts.append(reasoning_text)
                     _fire_first_delta()
-                    self._fire_reasoning_delta(reasoning_text)
-                    deltas_were_sent["yes"] = True
+                    if self._fire_reasoning_delta(reasoning_text):
+                        deltas_were_sent["yes"] = True
 
                 # Accumulate text content — fire callback only when no tool calls
                 if delta and delta.content:
@@ -3788,8 +3794,8 @@ class AIAgent:
                                 thinking_text = getattr(delta, "thinking", "")
                                 if thinking_text:
                                     _fire_first_delta()
-                                    self._fire_reasoning_delta(thinking_text)
-                                    deltas_were_sent["yes"] = True
+                                    if self._fire_reasoning_delta(thinking_text):
+                                        deltas_were_sent["yes"] = True
 
                 # Return the native Anthropic Message for downstream processing
                 return stream.get_final_message()
