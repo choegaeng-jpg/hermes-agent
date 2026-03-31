@@ -55,6 +55,46 @@ def _make_empty_chunk(model=None, usage=None):
     return SimpleNamespace(choices=[], model=model, usage=usage)
 
 
+class _FailAfterFirstAnthropicDeltaStream:
+    """Anthropic stream mock that emits one delta, then raises."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def __iter__(self):
+        yield SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(type="text_delta", text="partial text"),
+        )
+        raise RuntimeError("anthropic stream crashed after partial delivery")
+
+    def get_final_message(self):
+        raise AssertionError("get_final_message should not be called after stream crash")
+
+
+class _FailAfterFirstAnthropicReasoningDeltaStream:
+    """Anthropic stream mock that emits one reasoning delta, then raises."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def __iter__(self):
+        yield SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(type="thinking_delta", thinking="reasoning partial"),
+        )
+        raise RuntimeError("anthropic stream crashed after reasoning-only partial delivery")
+
+    def get_final_message(self):
+        raise AssertionError("get_final_message should not be called after stream crash")
+
+
 # ── Test: Streaming Accumulator ──────────────────────────────────────────
 
 
@@ -531,6 +571,155 @@ class TestStreamingFallback:
         assert mock_client.chat.completions.create.call_count == 3
         mock_non_stream.assert_called_once()
         assert mock_close.call_count >= 1
+
+    @patch("run_agent.AIAgent._interruptible_api_call")
+    def test_anthropic_no_fallback_after_partial_delivery(self, mock_non_stream):
+        """Anthropic stream: once any text delta is delivered, fallback must not run."""
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "anthropic_messages"
+        agent._interrupt_requested = False
+        agent._anthropic_client = MagicMock()
+        agent._anthropic_client.messages.stream.return_value = _FailAfterFirstAnthropicDeltaStream()
+
+        with pytest.raises(RuntimeError, match="partial delivery"):
+            agent._interruptible_streaming_api_call({})
+
+        mock_non_stream.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("env_value", "expected_attempts"),
+        [("invalid", 3), ("-1", 1), ("0", 1)],
+        ids=[
+            "invalid_env_uses_default_two_retries",
+            "negative_env_clamps_to_zero_retries",
+            "zero_env_runs_single_attempt",
+        ],
+    )
+    @patch("run_agent.AIAgent._interruptible_api_call")
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_stream_retries_env_validation_stable_retry_policy(
+        self,
+        mock_close,
+        mock_create,
+        mock_non_stream,
+        monkeypatch,
+        env_value,
+        expected_attempts,
+    ):
+        """Invalid/edge HERMES_STREAM_RETRIES values keep retry behavior and fallback stable."""
+        from run_agent import AIAgent
+        import httpx
+
+        monkeypatch.setenv("HERMES_STREAM_RETRIES", env_value)
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = httpx.ConnectError("socket closed")
+        mock_create.return_value = mock_client
+
+        mock_non_stream.return_value = SimpleNamespace(
+            id="fallback",
+            model="test",
+            choices=[SimpleNamespace(
+                index=0,
+                message=SimpleNamespace(
+                    role="assistant",
+                    content="fallback response",
+                    tool_calls=None,
+                    reasoning_content=None,
+                ),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+
+        agent = AIAgent(
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.choices[0].message.content == "fallback response"
+        assert mock_client.chat.completions.create.call_count == expected_attempts
+        mock_non_stream.assert_called_once()
+
+    @patch("run_agent.AIAgent._interruptible_api_call")
+    def test_no_fallback_after_partial_delivery_reasoning_only_delta(
+        self, mock_non_stream
+    ):
+        """Reasoning-only partial delivery follows no-fallback policy on stream errors."""
+        from run_agent import AIAgent
+
+        reasoning_deltas = []
+        agent = AIAgent(
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            reasoning_callback=lambda t: reasoning_deltas.append(t),
+        )
+        agent.api_mode = "anthropic_messages"
+        agent._interrupt_requested = False
+        agent._anthropic_client = MagicMock()
+        agent._anthropic_client.messages.stream.return_value = _FailAfterFirstAnthropicReasoningDeltaStream()
+
+        with pytest.raises(RuntimeError, match="reasoning-only partial delivery"):
+            agent._interruptible_streaming_api_call({})
+
+        assert reasoning_deltas == ["reasoning partial"]
+        mock_non_stream.assert_not_called()
+
+    @patch("run_agent.AIAgent._interruptible_api_call")
+    def test_reasoning_only_delta_without_callback_can_fallback(self, mock_non_stream):
+        """Hidden reasoning deltas must not count as partial delivery."""
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "anthropic_messages"
+        agent._interrupt_requested = False
+        agent._anthropic_client = MagicMock()
+        agent._anthropic_client.messages.stream.return_value = (
+            _FailAfterFirstAnthropicReasoningDeltaStream()
+        )
+
+        fallback_response = SimpleNamespace(
+            id="fallback",
+            model="test",
+            choices=[SimpleNamespace(
+                index=0,
+                message=SimpleNamespace(
+                    role="assistant",
+                    content="fallback response",
+                    tool_calls=None,
+                    reasoning_content=None,
+                ),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+        mock_non_stream.return_value = fallback_response
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response is fallback_response
+        mock_non_stream.assert_called_once()
 
 
 # ── Test: Reasoning Streaming ────────────────────────────────────────────

@@ -3536,14 +3536,20 @@ class AIAgent:
                 except Exception:
                     pass
 
-    def _fire_reasoning_delta(self, text: str) -> None:
-        """Fire reasoning callback if registered."""
+    def _fire_reasoning_delta(self, text: str) -> bool:
+        """Fire reasoning callback if registered.
+
+        Returns True only when reasoning text was actually emitted to a
+        registered callback.
+        """
         cb = self.reasoning_callback
         if cb is not None:
             try:
                 cb(text)
+                return True
             except Exception:
                 pass
+        return False
 
     def _fire_tool_gen_started(self, tool_name: str) -> None:
         """Notify display layer that the model is generating tool call arguments.
@@ -3660,7 +3666,8 @@ class AIAgent:
                 if reasoning_text:
                     reasoning_parts.append(reasoning_text)
                     _fire_first_delta()
-                    self._fire_reasoning_delta(reasoning_text)
+                    if self._fire_reasoning_delta(reasoning_text):
+                        deltas_were_sent["yes"] = True
 
                 # Accumulate text content — fire callback only when no tool calls
                 if delta and delta.content:
@@ -3782,11 +3789,13 @@ class AIAgent:
                                 if text and not has_tool_use:
                                     _fire_first_delta()
                                     self._fire_stream_delta(text)
+                                    deltas_were_sent["yes"] = True
                             elif delta_type == "thinking_delta":
                                 thinking_text = getattr(delta, "thinking", "")
                                 if thinking_text:
                                     _fire_first_delta()
-                                    self._fire_reasoning_delta(thinking_text)
+                                    if self._fire_reasoning_delta(thinking_text):
+                                        deltas_were_sent["yes"] = True
 
                 # Return the native Anthropic Message for downstream processing
                 return stream.get_final_message()
@@ -3794,7 +3803,21 @@ class AIAgent:
         def _call():
             import httpx as _httpx
 
-            _max_stream_retries = int(os.getenv("HERMES_STREAM_RETRIES", 2))
+            _raw_stream_retries = os.getenv("HERMES_STREAM_RETRIES", "2")
+            try:
+                _max_stream_retries = int(_raw_stream_retries)
+            except (TypeError, ValueError):
+                _max_stream_retries = 2
+                logger.warning(
+                    "Invalid HERMES_STREAM_RETRIES=%r; using default 2",
+                    _raw_stream_retries,
+                )
+            if _max_stream_retries < 0:
+                logger.warning(
+                    "Negative HERMES_STREAM_RETRIES=%s; clamping to 0",
+                    _max_stream_retries,
+                )
+                _max_stream_retries = 0
 
             try:
                 for _stream_attempt in range(_max_stream_retries + 1):
