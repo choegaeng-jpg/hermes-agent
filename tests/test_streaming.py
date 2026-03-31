@@ -532,6 +532,47 @@ class TestStreamingFallback:
         mock_non_stream.assert_called_once()
         assert mock_close.call_count >= 1
 
+    @patch("run_agent.AIAgent._interruptible_api_call")
+    def test_anthropic_partial_delta_error_does_not_fallback(self, mock_non_stream):
+        """Anthropic stream errors after partial delivery must not trigger fallback."""
+        from run_agent import AIAgent
+
+        def _anthropic_events():
+            yield SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(type="text_delta", text="partial"),
+            )
+            raise RuntimeError("anthropic stream broke")
+
+        mock_stream_ctx = MagicMock()
+        mock_stream_ctx.__enter__.return_value = mock_stream_ctx
+        mock_stream_ctx.__exit__.return_value = False
+        mock_stream_ctx.__iter__.return_value = _anthropic_events()
+        mock_stream_ctx.get_final_message.return_value = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="should not be used")]
+        )
+
+        mock_anthropic_client = MagicMock()
+        mock_anthropic_client.messages.stream.return_value = mock_stream_ctx
+
+        deltas = []
+        agent = AIAgent(
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=lambda t: deltas.append(t),
+        )
+        agent.api_mode = "anthropic_messages"
+        agent._interrupt_requested = False
+        agent._anthropic_client = mock_anthropic_client
+
+        with pytest.raises(RuntimeError, match="anthropic stream broke"):
+            agent._interruptible_streaming_api_call({})
+
+        assert deltas == ["partial"]
+        mock_non_stream.assert_not_called()
+
 
 # ── Test: Reasoning Streaming ────────────────────────────────────────────
 
