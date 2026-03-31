@@ -681,6 +681,46 @@ class TestStreamingFallback:
         assert reasoning_deltas == ["reasoning partial"]
         mock_non_stream.assert_not_called()
 
+    @patch("run_agent.AIAgent._interruptible_api_call")
+    def test_reasoning_only_delta_without_callback_can_fallback(self, mock_non_stream):
+        """Hidden reasoning deltas must not count as partial delivery."""
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "anthropic_messages"
+        agent._interrupt_requested = False
+        agent._anthropic_client = MagicMock()
+        agent._anthropic_client.messages.stream.return_value = (
+            _FailAfterFirstAnthropicReasoningDeltaStream()
+        )
+
+        fallback_response = SimpleNamespace(
+            id="fallback",
+            model="test",
+            choices=[SimpleNamespace(
+                index=0,
+                message=SimpleNamespace(
+                    role="assistant",
+                    content="fallback response",
+                    tool_calls=None,
+                    reasoning_content=None,
+                ),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+        mock_non_stream.return_value = fallback_response
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response is fallback_response
+        mock_non_stream.assert_called_once()
+
 
 # ── Test: Reasoning Streaming ────────────────────────────────────────────
 
