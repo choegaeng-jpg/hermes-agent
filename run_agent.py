@@ -3794,7 +3794,22 @@ class AIAgent:
         def _call():
             import httpx as _httpx
 
-            _max_stream_retries = int(os.getenv("HERMES_STREAM_RETRIES", 2))
+            _default_stream_retries = 2
+            _raw_stream_retries = os.getenv("HERMES_STREAM_RETRIES")
+            try:
+                if _raw_stream_retries is None:
+                    _max_stream_retries = _default_stream_retries
+                else:
+                    _max_stream_retries = int(_raw_stream_retries)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Invalid HERMES_STREAM_RETRIES value %r; using default %s",
+                    _raw_stream_retries,
+                    _default_stream_retries,
+                )
+                _max_stream_retries = _default_stream_retries
+
+            _max_stream_retries = max(0, _max_stream_retries)
 
             try:
                 for _stream_attempt in range(_max_stream_retries + 1):
