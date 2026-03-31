@@ -95,6 +95,14 @@ class _FailAfterFirstAnthropicReasoningDeltaStream:
         raise AssertionError("get_final_message should not be called after stream crash")
 
 
+class _FailAfterFirstChatReasoningDeltaStream:
+    """Chat-completions stream mock that emits one reasoning delta, then raises."""
+
+    def __iter__(self):
+        yield _make_stream_chunk(reasoning_content="hidden reasoning")
+        raise RuntimeError("chat stream crashed after hidden reasoning delta")
+
+
 # ── Test: Streaming Accumulator ──────────────────────────────────────────
 
 
@@ -715,6 +723,50 @@ class TestStreamingFallback:
             usage=None,
         )
         mock_non_stream.return_value = fallback_response
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response is fallback_response
+        mock_non_stream.assert_called_once()
+
+    @patch("run_agent.AIAgent._interruptible_api_call")
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_chat_reasoning_only_delta_without_callback_can_fallback(
+        self, mock_close, mock_create, mock_non_stream
+    ):
+        """Chat-completions hidden reasoning deltas must not block fallback."""
+        from run_agent import AIAgent
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _FailAfterFirstChatReasoningDeltaStream()
+        mock_create.return_value = mock_client
+
+        fallback_response = SimpleNamespace(
+            id="fallback",
+            model="test",
+            choices=[SimpleNamespace(
+                index=0,
+                message=SimpleNamespace(
+                    role="assistant",
+                    content="fallback response",
+                    tool_calls=None,
+                    reasoning_content=None,
+                ),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+        mock_non_stream.return_value = fallback_response
+
+        agent = AIAgent(
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
 
         response = agent._interruptible_streaming_api_call({})
 
