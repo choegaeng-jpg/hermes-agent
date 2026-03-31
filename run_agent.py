@@ -3666,7 +3666,8 @@ class AIAgent:
                 if reasoning_text:
                     reasoning_parts.append(reasoning_text)
                     _fire_first_delta()
-                    if self._fire_reasoning_delta(reasoning_text):
+                    reasoning_emitted = self._fire_reasoning_delta(reasoning_text)
+                    if reasoning_emitted:
                         deltas_were_sent["yes"] = True
 
                 # Accumulate text content — fire callback only when no tool calls
@@ -3794,7 +3795,8 @@ class AIAgent:
                                 thinking_text = getattr(delta, "thinking", "")
                                 if thinking_text:
                                     _fire_first_delta()
-                                    if self._fire_reasoning_delta(thinking_text):
+                                    thinking_emitted = self._fire_reasoning_delta(thinking_text)
+                                    if thinking_emitted:
                                         deltas_were_sent["yes"] = True
 
                 # Return the native Anthropic Message for downstream processing
