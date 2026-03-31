@@ -532,6 +532,59 @@ class TestStreamingFallback:
         mock_non_stream.assert_called_once()
         assert mock_close.call_count >= 1
 
+    @patch("run_agent.AIAgent._interruptible_api_call")
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_invalid_stream_retries_env_falls_back_cleanly(
+        self,
+        mock_close,
+        mock_create,
+        mock_non_stream,
+        monkeypatch,
+    ):
+        """Invalid HERMES_STREAM_RETRIES should not crash and should use default retries."""
+        from run_agent import AIAgent
+        import httpx
+
+        monkeypatch.setenv("HERMES_STREAM_RETRIES", "invalid")
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = httpx.ConnectError("socket closed")
+        mock_create.return_value = mock_client
+
+        fallback_response = SimpleNamespace(
+            id="fallback",
+            model="test",
+            choices=[SimpleNamespace(
+                index=0,
+                message=SimpleNamespace(
+                    role="assistant",
+                    content="fallback after invalid retry env",
+                    tool_calls=None,
+                    reasoning_content=None,
+                ),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+        mock_non_stream.return_value = fallback_response
+
+        agent = AIAgent(
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.choices[0].message.content == "fallback after invalid retry env"
+        assert mock_client.chat.completions.create.call_count == 3
+        mock_non_stream.assert_called_once()
+        assert mock_close.call_count >= 1
+
 
 # ── Test: Reasoning Streaming ────────────────────────────────────────────
 
